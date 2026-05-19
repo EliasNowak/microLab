@@ -1,5 +1,6 @@
 #include "main.h"
 #include "adc_speed.h"
+#include "motion_control.h"
 #include "position_pwm.h"
 #include "pwm.h"
 #include "spi.h"
@@ -28,8 +29,17 @@ typedef enum
     UART_COMMAND_POSITION_READ = 'r',
     UART_COMMAND_POSITION_MONITOR = 'm',
     UART_COMMAND_ADC_READ = 'a',
-    UART_COMMAND_ADC_MONITOR = 'v'
+    UART_COMMAND_ADC_MONITOR = 'v',
+    UART_COMMAND_TARGET_DIRECTION_TOGGLE = 'x'
 } uart_command_t;
+
+typedef enum
+{
+    TARGET_PARSE_NONE = 0,
+    TARGET_PARSE_PENDING,
+    TARGET_PARSE_READY,
+    TARGET_PARSE_INVALID
+} target_parse_result_t;
 
 static uint8_t app_lock_mask = APP_ALL_LOCKS;
 static logan_spi_direction_t app_direction = LOGAN_SPI_DIRECTION_BACK;
@@ -41,6 +51,11 @@ static bool app_adc_monitor_enabled = false;
 static uint8_t app_position_report_count = 0U;
 static uint8_t app_adc_report_count = 0U;
 static uint16_t app_step_frequency_hz = STEP_PWM_DEFAULT_FREQUENCY_HZ;
+static bool app_target_parse_active = false;
+static uint8_t app_target_parse_digits = 0U;
+static uint8_t app_target_parse_value = 0U;
+
+static void app_stop_drive(void);
 
 static uart_command_t app_parse_uart_command(uint8_t ch)
 {
@@ -80,9 +95,61 @@ static uart_command_t app_parse_uart_command(uint8_t ch)
             return UART_COMMAND_ADC_READ;
         case 'v':
             return UART_COMMAND_ADC_MONITOR;
+        case 'x':
+            return UART_COMMAND_TARGET_DIRECTION_TOGGLE;
         default:
             return UART_COMMAND_INVALID;
     }
+}
+
+static target_parse_result_t app_parse_target_command(uint8_t ch, uint8_t *target_area)
+{
+    if (!app_target_parse_active)
+    {
+        if ((ch == 'T') || (ch == 't'))
+        {
+            app_target_parse_active = true;
+            app_target_parse_digits = 0U;
+            app_target_parse_value = 0U;
+            return TARGET_PARSE_PENDING;
+        }
+
+        return TARGET_PARSE_NONE;
+    }
+
+    if ((ch >= '0') && (ch <= '9'))
+    {
+        app_target_parse_value = (uint8_t)((app_target_parse_value * 10U) + (ch - '0'));
+        app_target_parse_digits++;
+
+        if ((app_target_parse_digits >= 2U)
+            || ((app_target_parse_digits == 1U) && (app_target_parse_value >= 2U)))
+        {
+            app_target_parse_active = false;
+            if ((app_target_parse_value >= MOTION_CONTROL_MIN_AREA)
+                && (app_target_parse_value <= MOTION_CONTROL_MAX_AREA))
+            {
+                *target_area = app_target_parse_value;
+                return TARGET_PARSE_READY;
+            }
+
+            return TARGET_PARSE_INVALID;
+        }
+
+        return TARGET_PARSE_PENDING;
+    }
+
+    app_target_parse_active = false;
+    if (((ch == '\r') || (ch == '\n') || (ch == ' '))
+        && (app_target_parse_digits > 0U)
+        && (app_target_parse_value >= MOTION_CONTROL_MIN_AREA)
+        && (app_target_parse_value <= MOTION_CONTROL_MAX_AREA))
+    {
+        *target_area = app_target_parse_value;
+        return TARGET_PARSE_READY;
+    }
+
+    return TARGET_PARSE_INVALID;
 }
 
 static char app_hex_digit(uint8_t value)
@@ -163,6 +230,52 @@ static void app_write_adc_sample(const adc_speed_sample_t *sample)
     uart_cli_write_string("Hz\r\n");
 }
 
+static void app_write_motion_status_prefix(const char *prefix,
+                                           const motion_control_status_t *status)
+{
+    uart_cli_write_string(prefix);
+    uart_cli_write_string(" area=");
+    if (status->has_current_area)
+    {
+        app_write_u32(status->current_area);
+    }
+    else
+    {
+        uart_cli_write_byte('?');
+    }
+    uart_cli_write_string(" target=");
+    app_write_u32(status->target_area);
+}
+
+static void app_write_motion_error(motion_control_error_t error)
+{
+    switch (error)
+    {
+        case MOTION_CONTROL_ERROR_INVALID_TARGET:
+            uart_cli_write_string("invalid-target");
+            break;
+        case MOTION_CONTROL_ERROR_POSITION_TIMEOUT:
+            uart_cli_write_string("pos-timeout");
+            break;
+        case MOTION_CONTROL_ERROR_POSITION_INVALID:
+            uart_cli_write_string("pos-invalid");
+            break;
+        case MOTION_CONTROL_ERROR_HARDWARE:
+            uart_cli_write_string("hw-error");
+            break;
+        case MOTION_CONTROL_ERROR_NO_PROGRESS:
+            uart_cli_write_string("no-progress");
+            break;
+        case MOTION_CONTROL_ERROR_WRONG_DIRECTION:
+            uart_cli_write_string("wrong-direction");
+            break;
+        case MOTION_CONTROL_ERROR_NONE:
+        default:
+            uart_cli_write_string("none");
+            break;
+    }
+}
+
 static void app_write_latest_position(void)
 {
     position_pwm_sample_t sample;
@@ -204,7 +317,16 @@ static void app_set_single_open_lock(uint8_t open_lock)
 
 static void app_write_help(void)
 {
-    uart_cli_write_string("cmd: 1-5 select, F/B drive, s stop, l lock, p step, r pos, m pos mon, a adc, v adc mon\r\n");
+    uart_cli_write_string("cmd: 1-5 select, F/B drive, s stop, l lock, p step, r pos, m pos mon, a adc, v adc mon, T01-T17 target, x dir map\r\n");
+}
+
+static void app_abort_motion_if_active(void)
+{
+    if (motion_control_abort())
+    {
+        app_stop_drive();
+        uart_cli_write_string("target aborted\r\n");
+    }
 }
 
 static void app_start_drive(logan_spi_direction_t direction)
@@ -240,37 +362,47 @@ static void app_handle_uart_command(uart_command_t command)
             app_write_help();
             break;
         case UART_COMMAND_SELECT_SP1:
+            app_abort_motion_if_active();
             app_set_single_open_lock(LOGAN_SPI_CONTROL_SP1);
             break;
         case UART_COMMAND_SELECT_SP2:
+            app_abort_motion_if_active();
             app_set_single_open_lock(LOGAN_SPI_CONTROL_SP2);
             break;
         case UART_COMMAND_SELECT_SP3:
+            app_abort_motion_if_active();
             app_set_single_open_lock(LOGAN_SPI_CONTROL_SP3);
             break;
         case UART_COMMAND_SELECT_SP4:
+            app_abort_motion_if_active();
             app_set_single_open_lock(LOGAN_SPI_CONTROL_SP4);
             break;
         case UART_COMMAND_SELECT_SP5:
+            app_abort_motion_if_active();
             app_set_single_open_lock(LOGAN_SPI_CONTROL_SP5);
             break;
         case UART_COMMAND_LOCK_ALL:
+            app_abort_motion_if_active();
             app_lock_all();
             uart_cli_write_string("locked\r\n");
             break;
         case UART_COMMAND_STOP:
+            app_abort_motion_if_active();
             app_stop_drive();
             uart_cli_write_string("stopped\r\n");
             break;
         case UART_COMMAND_DRIVE_FRONT:
+            app_abort_motion_if_active();
             app_start_drive(LOGAN_SPI_DIRECTION_FRONT);
             uart_cli_write_string("drive front\r\n");
             break;
         case UART_COMMAND_DRIVE_BACK:
+            app_abort_motion_if_active();
             app_start_drive(LOGAN_SPI_DIRECTION_BACK);
             uart_cli_write_string("drive back\r\n");
             break;
         case UART_COMMAND_STEP_PWM_TEST:
+            app_abort_motion_if_active();
             step_pwm_start();
             uart_cli_write_string("step test on\r\n");
             break;
@@ -304,11 +436,62 @@ static void app_handle_uart_command(uart_command_t command)
                 uart_cli_write_string("adc monitor off\r\n");
             }
             break;
+        case UART_COMMAND_TARGET_DIRECTION_TOGGLE:
+            app_abort_motion_if_active();
+            motion_control_set_front_increases_area(!motion_control_get_front_increases_area());
+            if (motion_control_get_front_increases_area())
+            {
+                uart_cli_write_string("target map: F increases area\r\n");
+            }
+            else
+            {
+                uart_cli_write_string("target map: F decreases area\r\n");
+            }
+            break;
         case UART_COMMAND_INVALID:
         default:
             uart_cli_write_string("invalid cmd, ? for help\r\n");
             break;
     }
+}
+
+static void app_handle_target_command(uint8_t target_area)
+{
+    app_abort_motion_if_active();
+    step_pwm_stop();
+    app_step_start_pending = false;
+
+    if (!motion_control_start_target(target_area))
+    {
+        uart_cli_write_string("target invalid\r\n");
+        return;
+    }
+
+    uart_cli_write_string("target ");
+    app_write_u32(target_area);
+    uart_cli_write_string("\r\n");
+}
+
+static void app_handle_uart_input(uint8_t ch)
+{
+    uint8_t target_area = 0U;
+
+    switch (app_parse_target_command(ch, &target_area))
+    {
+        case TARGET_PARSE_READY:
+            app_handle_target_command(target_area);
+            return;
+        case TARGET_PARSE_PENDING:
+            return;
+        case TARGET_PARSE_INVALID:
+            uart_cli_write_string("invalid target, use T01-T17\r\n");
+            return;
+        case TARGET_PARSE_NONE:
+        default:
+            break;
+    }
+
+    app_handle_uart_command(app_parse_uart_command(ch));
 }
 
 static bool app_try_send_control(void)
@@ -379,6 +562,80 @@ static bool app_try_apply_adc_speed(void)
     return true;
 }
 
+static void app_apply_motion_action(const motion_control_action_t *action)
+{
+    if (action->stop_step)
+    {
+        step_pwm_stop();
+        app_step_start_pending = false;
+    }
+
+    if (action->update_control)
+    {
+        app_freewheel = action->freewheel;
+        app_direction = action->direction;
+        app_lock_mask = action->lock_mask;
+        app_request_control_send();
+    }
+
+    if (action->start_step)
+    {
+        step_pwm_start();
+    }
+}
+
+static void app_report_motion_action(const motion_control_action_t *action)
+{
+    motion_control_status_t status = motion_control_get_status();
+
+    if (action->started)
+    {
+        app_write_motion_status_prefix("target run", &status);
+        if (status.direction == LOGAN_SPI_DIRECTION_FRONT)
+        {
+            uart_cli_write_string(" dir=F\r\n");
+        }
+        else
+        {
+            uart_cli_write_string(" dir=B\r\n");
+        }
+    }
+
+    if (action->start_step)
+    {
+        uart_cli_write_string("target step on\r\n");
+    }
+
+    if (action->completed)
+    {
+        app_write_motion_status_prefix("target reached", &status);
+        uart_cli_write_string("\r\n");
+    }
+
+    if (action->failed)
+    {
+        app_write_motion_status_prefix("target error", &status);
+        uart_cli_write_string(" ");
+        app_write_motion_error(status.error);
+        uart_cli_write_string("\r\n");
+    }
+}
+
+static bool app_try_run_motion(const position_pwm_sample_t *new_position_sample)
+{
+    motion_control_action_t action;
+    bool control_ready = !app_control_send_pending && !logan_spi_is_busy();
+
+    if (!motion_control_process(new_position_sample, control_ready, &action))
+    {
+        return false;
+    }
+
+    app_apply_motion_action(&action);
+    app_report_motion_action(&action);
+    return true;
+}
+
 static bool app_try_start_pending_step(void)
 {
     if (!app_step_start_pending)
@@ -397,16 +654,14 @@ static bool app_try_start_pending_step(void)
     return true;
 }
 
-static bool app_try_report_position(void)
+static bool app_try_report_position(const position_pwm_sample_t *sample)
 {
-    position_pwm_sample_t sample;
-
     if (!app_position_monitor_enabled)
     {
         return false;
     }
 
-    if (!position_pwm_take_new_sample(&sample))
+    if (sample == NULL)
     {
         return false;
     }
@@ -418,7 +673,7 @@ static bool app_try_report_position(void)
     }
 
     app_position_report_count = 0U;
-    app_write_position_sample(&sample);
+    app_write_position_sample(sample);
     return true;
 }
 
@@ -433,16 +688,19 @@ int main(void)
     step_pwm_init();
     position_pwm_init();
     adc_speed_init();
+    motion_control_init();
 
     while (1)
     {
         bool did_work = false;
         uint8_t ch;
+        position_pwm_sample_t position_sample;
+        position_pwm_sample_t *new_position_sample = NULL;
 
         if (uart_cli_read(&ch))
         {
             did_work = true;
-            app_handle_uart_command(app_parse_uart_command(ch));
+            app_handle_uart_input(ch);
         }
 
         if (app_try_send_control())
@@ -460,7 +718,17 @@ int main(void)
             did_work = true;
         }
 
-        if (app_try_report_position())
+        if (position_pwm_take_new_sample(&position_sample))
+        {
+            new_position_sample = &position_sample;
+        }
+
+        if (app_try_run_motion(new_position_sample))
+        {
+            did_work = true;
+        }
+
+        if (app_try_report_position(new_position_sample))
         {
             did_work = true;
         }
@@ -476,4 +744,5 @@ void SysTick_Handler(void)
 {
     logan_spi_tick_1ms();
     adc_speed_tick_1ms();
+    motion_control_tick_1ms();
 }
