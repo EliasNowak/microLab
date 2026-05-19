@@ -48,12 +48,12 @@ static bool app_control_send_pending = true;
 static bool app_step_start_pending = false;
 static bool app_position_monitor_enabled = false;
 static bool app_adc_monitor_enabled = false;
-static uint8_t app_position_report_count = 0U;
 static uint8_t app_adc_report_count = 0U;
 static uint16_t app_step_frequency_hz = STEP_PWM_DEFAULT_FREQUENCY_HZ;
 static bool app_target_parse_active = false;
 static uint8_t app_target_parse_digits = 0U;
-static uint8_t app_target_parse_value = 0U;
+static uint8_t app_target_parse_buffer[3];
+static uint8_t app_position_report_count[POSITION_PWM_CHANNEL_COUNT];
 
 static void app_stop_drive(void);
 
@@ -102,7 +102,44 @@ static uart_command_t app_parse_uart_command(uint8_t ch)
     }
 }
 
-static target_parse_result_t app_parse_target_command(uint8_t ch, uint8_t *target_area)
+static bool app_target_parse_finish(uint8_t *drive_id, uint8_t *target_area)
+{
+    uint8_t drive = MOTION_CONTROL_MIN_DRIVE;
+    uint8_t area = 0U;
+
+    if (app_target_parse_digits == 1U)
+    {
+        area = app_target_parse_buffer[0];
+    }
+    else if (app_target_parse_digits == 2U)
+    {
+        area = (uint8_t)((app_target_parse_buffer[0] * 10U) + app_target_parse_buffer[1]);
+    }
+    else if (app_target_parse_digits == 3U)
+    {
+        drive = app_target_parse_buffer[0];
+        area = (uint8_t)((app_target_parse_buffer[1] * 10U) + app_target_parse_buffer[2]);
+    }
+
+    app_target_parse_active = false;
+
+    if ((app_target_parse_digits == 0U)
+        || (drive < MOTION_CONTROL_MIN_DRIVE)
+        || (drive > MOTION_CONTROL_MAX_DRIVE)
+        || (area < MOTION_CONTROL_MIN_AREA)
+        || (area > MOTION_CONTROL_MAX_AREA))
+    {
+        return false;
+    }
+
+    *drive_id = drive;
+    *target_area = area;
+    return true;
+}
+
+static target_parse_result_t app_parse_target_command(uint8_t ch,
+                                                      uint8_t *drive_id,
+                                                      uint8_t *target_area)
 {
     if (!app_target_parse_active)
     {
@@ -110,7 +147,6 @@ static target_parse_result_t app_parse_target_command(uint8_t ch, uint8_t *targe
         {
             app_target_parse_active = true;
             app_target_parse_digits = 0U;
-            app_target_parse_value = 0U;
             return TARGET_PARSE_PENDING;
         }
 
@@ -119,17 +155,19 @@ static target_parse_result_t app_parse_target_command(uint8_t ch, uint8_t *targe
 
     if ((ch >= '0') && (ch <= '9'))
     {
-        app_target_parse_value = (uint8_t)((app_target_parse_value * 10U) + (ch - '0'));
-        app_target_parse_digits++;
-
-        if ((app_target_parse_digits >= 2U)
-            || ((app_target_parse_digits == 1U) && (app_target_parse_value >= 2U)))
+        if (app_target_parse_digits >= sizeof(app_target_parse_buffer))
         {
             app_target_parse_active = false;
-            if ((app_target_parse_value >= MOTION_CONTROL_MIN_AREA)
-                && (app_target_parse_value <= MOTION_CONTROL_MAX_AREA))
+            return TARGET_PARSE_INVALID;
+        }
+
+        app_target_parse_buffer[app_target_parse_digits] = (uint8_t)(ch - '0');
+        app_target_parse_digits++;
+
+        if (app_target_parse_digits >= sizeof(app_target_parse_buffer))
+        {
+            if (app_target_parse_finish(drive_id, target_area))
             {
-                *target_area = app_target_parse_value;
                 return TARGET_PARSE_READY;
             }
 
@@ -141,11 +179,8 @@ static target_parse_result_t app_parse_target_command(uint8_t ch, uint8_t *targe
 
     app_target_parse_active = false;
     if (((ch == '\r') || (ch == '\n') || (ch == ' '))
-        && (app_target_parse_digits > 0U)
-        && (app_target_parse_value >= MOTION_CONTROL_MIN_AREA)
-        && (app_target_parse_value <= MOTION_CONTROL_MAX_AREA))
+        && app_target_parse_finish(drive_id, target_area))
     {
-        *target_area = app_target_parse_value;
         return TARGET_PARSE_READY;
     }
 
@@ -196,9 +231,11 @@ static void app_write_u32(uint32_t value)
     }
 }
 
-static void app_write_position_sample(const position_pwm_sample_t *sample)
+static void app_write_position_sample(uint8_t channel, const position_pwm_sample_t *sample)
 {
-    uart_cli_write_string("pos p=");
+    uart_cli_write_string("pos");
+    app_write_u32((uint32_t)channel + 1U);
+    uart_cli_write_string(" p=");
     app_write_u32(sample->period_us);
     uart_cli_write_string("us h=");
     app_write_u32(sample->high_us);
@@ -234,6 +271,8 @@ static void app_write_motion_status_prefix(const char *prefix,
                                            const motion_control_status_t *status)
 {
     uart_cli_write_string(prefix);
+    uart_cli_write_string(" drive=");
+    app_write_u32(status->drive_id);
     uart_cli_write_string(" area=");
     if (status->has_current_area)
     {
@@ -253,6 +292,9 @@ static void app_write_motion_error(motion_control_error_t error)
     {
         case MOTION_CONTROL_ERROR_INVALID_TARGET:
             uart_cli_write_string("invalid-target");
+            break;
+        case MOTION_CONTROL_ERROR_INVALID_DRIVE:
+            uart_cli_write_string("invalid-drive");
             break;
         case MOTION_CONTROL_ERROR_POSITION_TIMEOUT:
             uart_cli_write_string("pos-timeout");
@@ -279,14 +321,20 @@ static void app_write_motion_error(motion_control_error_t error)
 static void app_write_latest_position(void)
 {
     position_pwm_sample_t sample;
+    uint8_t channel;
 
-    if (position_pwm_get_latest(&sample))
+    for (channel = 0U; channel < POSITION_PWM_CHANNEL_COUNT; channel++)
     {
-        app_write_position_sample(&sample);
-    }
-    else
-    {
-        uart_cli_write_string("pos no sample\r\n");
+        if (position_pwm_get_latest_channel(channel, &sample))
+        {
+            app_write_position_sample(channel, &sample);
+        }
+        else
+        {
+            uart_cli_write_string("pos");
+            app_write_u32((uint32_t)channel + 1U);
+            uart_cli_write_string(" no sample\r\n");
+        }
     }
 }
 
@@ -317,7 +365,17 @@ static void app_set_single_open_lock(uint8_t open_lock)
 
 static void app_write_help(void)
 {
-    uart_cli_write_string("cmd: 1-5 select, F/B drive, s stop, l lock, p step, r pos, m pos mon, a adc, v adc mon, T01-T17 target, x dir map\r\n");
+    uart_cli_write_string("cmd: 1-5 select, F/B drive, s stop, l lock, p step, r pos, m pos mon, a adc, v adc mon, T105 target, x dir map\r\n");
+}
+
+static void app_reset_position_report_counts(void)
+{
+    uint8_t channel;
+
+    for (channel = 0U; channel < POSITION_PWM_CHANNEL_COUNT; channel++)
+    {
+        app_position_report_count[channel] = 0U;
+    }
 }
 
 static void app_abort_motion_if_active(void)
@@ -411,7 +469,7 @@ static void app_handle_uart_command(uart_command_t command)
             break;
         case UART_COMMAND_POSITION_MONITOR:
             app_position_monitor_enabled = !app_position_monitor_enabled;
-            app_position_report_count = 0U;
+            app_reset_position_report_counts();
             if (app_position_monitor_enabled)
             {
                 uart_cli_write_string("pos monitor on\r\n");
@@ -455,19 +513,21 @@ static void app_handle_uart_command(uart_command_t command)
     }
 }
 
-static void app_handle_target_command(uint8_t target_area)
+static void app_handle_target_command(uint8_t drive_id, uint8_t target_area)
 {
     app_abort_motion_if_active();
     step_pwm_stop();
     app_step_start_pending = false;
 
-    if (!motion_control_start_target(target_area))
+    if (!motion_control_start_target(drive_id, target_area))
     {
         uart_cli_write_string("target invalid\r\n");
         return;
     }
 
-    uart_cli_write_string("target ");
+    uart_cli_write_string("target drive=");
+    app_write_u32(drive_id);
+    uart_cli_write_string(" area=");
     app_write_u32(target_area);
     uart_cli_write_string("\r\n");
 }
@@ -475,16 +535,17 @@ static void app_handle_target_command(uint8_t target_area)
 static void app_handle_uart_input(uint8_t ch)
 {
     uint8_t target_area = 0U;
+    uint8_t drive_id = MOTION_CONTROL_MIN_DRIVE;
 
-    switch (app_parse_target_command(ch, &target_area))
+    switch (app_parse_target_command(ch, &drive_id, &target_area))
     {
         case TARGET_PARSE_READY:
-            app_handle_target_command(target_area);
+            app_handle_target_command(drive_id, target_area);
             return;
         case TARGET_PARSE_PENDING:
             return;
         case TARGET_PARSE_INVALID:
-            uart_cli_write_string("invalid target, use T01-T17\r\n");
+            uart_cli_write_string("invalid target, use T105 or T17\r\n");
             return;
         case TARGET_PARSE_NONE:
         default:
@@ -621,10 +682,20 @@ static void app_report_motion_action(const motion_control_action_t *action)
     }
 }
 
-static bool app_try_run_motion(const position_pwm_sample_t *new_position_sample)
+static bool app_try_run_motion(const position_pwm_sample_t *position_samples,
+                               const bool *position_sample_ready)
 {
     motion_control_action_t action;
+    motion_control_status_t status = motion_control_get_status();
+    const position_pwm_sample_t *new_position_sample = NULL;
     bool control_ready = !app_control_send_pending && !logan_spi_is_busy();
+
+    if ((status.drive_id >= MOTION_CONTROL_MIN_DRIVE)
+        && (status.drive_id <= MOTION_CONTROL_MAX_DRIVE)
+        && position_sample_ready[status.drive_id - 1U])
+    {
+        new_position_sample = &position_samples[status.drive_id - 1U];
+    }
 
     if (!motion_control_process(new_position_sample, control_ready, &action))
     {
@@ -654,7 +725,7 @@ static bool app_try_start_pending_step(void)
     return true;
 }
 
-static bool app_try_report_position(const position_pwm_sample_t *sample)
+static bool app_try_report_position(uint8_t channel, const position_pwm_sample_t *sample)
 {
     if (!app_position_monitor_enabled)
     {
@@ -666,14 +737,14 @@ static bool app_try_report_position(const position_pwm_sample_t *sample)
         return false;
     }
 
-    app_position_report_count++;
-    if (app_position_report_count < APP_POSITION_REPORT_DIVIDER)
+    app_position_report_count[channel]++;
+    if (app_position_report_count[channel] < APP_POSITION_REPORT_DIVIDER)
     {
         return true;
     }
 
-    app_position_report_count = 0U;
-    app_write_position_sample(sample);
+    app_position_report_count[channel] = 0U;
+    app_write_position_sample(channel, sample);
     return true;
 }
 
@@ -694,8 +765,9 @@ int main(void)
     {
         bool did_work = false;
         uint8_t ch;
-        position_pwm_sample_t position_sample;
-        position_pwm_sample_t *new_position_sample = NULL;
+        uint8_t channel;
+        position_pwm_sample_t position_samples[POSITION_PWM_CHANNEL_COUNT];
+        bool position_sample_ready[POSITION_PWM_CHANNEL_COUNT] = { false };
 
         if (uart_cli_read(&ch))
         {
@@ -718,19 +790,26 @@ int main(void)
             did_work = true;
         }
 
-        if (position_pwm_take_new_sample(&position_sample))
+        for (channel = 0U; channel < POSITION_PWM_CHANNEL_COUNT; channel++)
         {
-            new_position_sample = &position_sample;
+            if (position_pwm_take_new_sample_channel(channel, &position_samples[channel]))
+            {
+                position_sample_ready[channel] = true;
+            }
         }
 
-        if (app_try_run_motion(new_position_sample))
+        if (app_try_run_motion(position_samples, position_sample_ready))
         {
             did_work = true;
         }
 
-        if (app_try_report_position(new_position_sample))
+        for (channel = 0U; channel < POSITION_PWM_CHANNEL_COUNT; channel++)
         {
-            did_work = true;
+            if (app_try_report_position(channel,
+                                        position_sample_ready[channel] ? &position_samples[channel] : NULL))
+            {
+                did_work = true;
+            }
         }
 
         if (!did_work)

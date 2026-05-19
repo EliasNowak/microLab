@@ -2,11 +2,11 @@
 
 #include <stddef.h>
 
-#define MOTION_CONTROL_DRIVE_LOCK_MASK (LOGAN_SPI_CONTROL_LOCK_MASK & (uint8_t)~LOGAN_SPI_CONTROL_SP1)
 #define MOTION_CONTROL_HOLD_LOCK_MASK LOGAN_SPI_CONTROL_LOCK_MASK
 
 static volatile motion_control_state_t state = MOTION_CONTROL_STATE_IDLE;
 static volatile motion_control_error_t error = MOTION_CONTROL_ERROR_NONE;
+static volatile uint8_t drive_id = MOTION_CONTROL_MIN_DRIVE;
 static volatile uint8_t target_area = 0U;
 static volatile uint8_t current_area = 0U;
 static volatile bool has_current_area = false;
@@ -16,6 +16,35 @@ static volatile uint16_t ms_since_position_sample = 0U;
 static volatile uint16_t ms_since_progress = 0U;
 
 static uint8_t last_area = 0U;
+
+static bool motion_control_drive_valid(uint8_t drive)
+{
+    return (drive >= MOTION_CONTROL_MIN_DRIVE) && (drive <= MOTION_CONTROL_MAX_DRIVE);
+}
+
+static uint8_t motion_control_lock_bit_for_drive(uint8_t drive)
+{
+    static const uint8_t lock_bits[MOTION_CONTROL_MAX_DRIVE] =
+    {
+        LOGAN_SPI_CONTROL_SP1,
+        LOGAN_SPI_CONTROL_SP2,
+        LOGAN_SPI_CONTROL_SP3,
+        LOGAN_SPI_CONTROL_SP4,
+        LOGAN_SPI_CONTROL_SP5
+    };
+
+    if (!motion_control_drive_valid(drive))
+    {
+        return 0U;
+    }
+
+    return lock_bits[drive - 1U];
+}
+
+static uint8_t motion_control_drive_lock_mask(void)
+{
+    return MOTION_CONTROL_HOLD_LOCK_MASK & (uint8_t)~motion_control_lock_bit_for_drive(drive_id);
+}
 
 static void motion_control_clear_action(motion_control_action_t *action)
 {
@@ -117,7 +146,7 @@ static void motion_control_prepare_drive(motion_control_action_t *action)
     action->started = true;
     action->freewheel = false;
     action->direction = direction;
-    action->lock_mask = MOTION_CONTROL_DRIVE_LOCK_MASK;
+    action->lock_mask = motion_control_drive_lock_mask();
     state = MOTION_CONTROL_STATE_WAIT_SPI_START;
 }
 
@@ -165,6 +194,7 @@ void motion_control_init(void)
 {
     state = MOTION_CONTROL_STATE_IDLE;
     error = MOTION_CONTROL_ERROR_NONE;
+    drive_id = MOTION_CONTROL_MIN_DRIVE;
     target_area = 0U;
     current_area = 0U;
     has_current_area = false;
@@ -195,8 +225,15 @@ void motion_control_tick_1ms(void)
     }
 }
 
-bool motion_control_start_target(uint8_t area)
+bool motion_control_start_target(uint8_t drive, uint8_t area)
 {
+    if (!motion_control_drive_valid(drive))
+    {
+        error = MOTION_CONTROL_ERROR_INVALID_DRIVE;
+        state = MOTION_CONTROL_STATE_ERROR;
+        return false;
+    }
+
     if ((area < MOTION_CONTROL_MIN_AREA) || (area > MOTION_CONTROL_MAX_AREA))
     {
         error = MOTION_CONTROL_ERROR_INVALID_TARGET;
@@ -204,6 +241,7 @@ bool motion_control_start_target(uint8_t area)
         return false;
     }
 
+    drive_id = drive;
     target_area = area;
     error = MOTION_CONTROL_ERROR_NONE;
     state = MOTION_CONTROL_STATE_WAIT_POSITION;
@@ -352,6 +390,7 @@ motion_control_status_t motion_control_get_status(void)
 
     status.state = state;
     status.error = error;
+    status.drive_id = drive_id;
     status.target_area = target_area;
     status.current_area = current_area;
     status.has_current_area = has_current_area;

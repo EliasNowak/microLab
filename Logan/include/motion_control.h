@@ -9,6 +9,8 @@
 
 #define MOTION_CONTROL_MIN_AREA 1U
 #define MOTION_CONTROL_MAX_AREA 17U
+#define MOTION_CONTROL_MIN_DRIVE 1U
+#define MOTION_CONTROL_MAX_DRIVE 5U
 #define MOTION_CONTROL_SAMPLE_TIMEOUT_MS 250U
 #define MOTION_CONTROL_NO_PROGRESS_TIMEOUT_MS 5000U
 
@@ -25,6 +27,7 @@ typedef enum
 typedef enum
 {
     MOTION_CONTROL_ERROR_NONE = 0,
+    MOTION_CONTROL_ERROR_INVALID_DRIVE,
     MOTION_CONTROL_ERROR_INVALID_TARGET,
     MOTION_CONTROL_ERROR_POSITION_TIMEOUT,
     MOTION_CONTROL_ERROR_POSITION_INVALID,
@@ -50,6 +53,7 @@ typedef struct
 {
     motion_control_state_t state;
     motion_control_error_t error;
+    uint8_t drive_id;
     uint8_t target_area;
     uint8_t current_area;
     bool has_current_area;
@@ -59,7 +63,7 @@ typedef struct
 
 void motion_control_init(void);
 void motion_control_tick_1ms(void);
-bool motion_control_start_target(uint8_t target_area);
+bool motion_control_start_target(uint8_t drive_id, uint8_t target_area);
 bool motion_control_abort(void);
 bool motion_control_is_active(void);
 void motion_control_set_front_increases_area(bool front_increases);
