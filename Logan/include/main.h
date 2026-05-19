@@ -10,5 +10,6 @@
 #include "stm32f3xx_ll_usart.h"
 #include "stm32f3xx_ll_spi.h"
 #include "stm32f3xx_ll_tim.h"
+#include "stm32f3xx_ll_exti.h"
 
 #endif /* MAIN_H */
