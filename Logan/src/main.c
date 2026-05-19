@@ -1,4 +1,5 @@
 #include "main.h"
+#include "adc_speed.h"
 #include "position_pwm.h"
 #include "pwm.h"
 #include "spi.h"
@@ -6,6 +7,8 @@
 
 #define APP_ALL_LOCKS LOGAN_SPI_CONTROL_LOCK_MASK
 #define APP_POSITION_REPORT_DIVIDER 16U
+#define APP_ADC_REPORT_DIVIDER 10U
+#define APP_ADC_SPEED_DEADBAND_HZ 25U
 
 typedef enum
 {
@@ -23,7 +26,9 @@ typedef enum
     UART_COMMAND_DRIVE_BACK = 'B',
     UART_COMMAND_STEP_PWM_TEST = 'p',
     UART_COMMAND_POSITION_READ = 'r',
-    UART_COMMAND_POSITION_MONITOR = 'm'
+    UART_COMMAND_POSITION_MONITOR = 'm',
+    UART_COMMAND_ADC_READ = 'a',
+    UART_COMMAND_ADC_MONITOR = 'v'
 } uart_command_t;
 
 static uint8_t app_lock_mask = APP_ALL_LOCKS;
@@ -32,7 +37,10 @@ static bool app_freewheel = true;
 static bool app_control_send_pending = true;
 static bool app_step_start_pending = false;
 static bool app_position_monitor_enabled = false;
+static bool app_adc_monitor_enabled = false;
 static uint8_t app_position_report_count = 0U;
+static uint8_t app_adc_report_count = 0U;
+static uint16_t app_step_frequency_hz = STEP_PWM_DEFAULT_FREQUENCY_HZ;
 
 static uart_command_t app_parse_uart_command(uint8_t ch)
 {
@@ -68,6 +76,10 @@ static uart_command_t app_parse_uart_command(uint8_t ch)
             return UART_COMMAND_POSITION_READ;
         case 'm':
             return UART_COMMAND_POSITION_MONITOR;
+        case 'a':
+            return UART_COMMAND_ADC_READ;
+        case 'v':
+            return UART_COMMAND_ADC_MONITOR;
         default:
             return UART_COMMAND_INVALID;
     }
@@ -142,6 +154,15 @@ static void app_write_position_sample(const position_pwm_sample_t *sample)
     }
 }
 
+static void app_write_adc_sample(const adc_speed_sample_t *sample)
+{
+    uart_cli_write_string("adc raw=");
+    app_write_u32(sample->raw);
+    uart_cli_write_string(" freq=");
+    app_write_u32(sample->frequency_hz);
+    uart_cli_write_string("Hz\r\n");
+}
+
 static void app_write_latest_position(void)
 {
     position_pwm_sample_t sample;
@@ -153,6 +174,20 @@ static void app_write_latest_position(void)
     else
     {
         uart_cli_write_string("pos no sample\r\n");
+    }
+}
+
+static void app_write_latest_adc(void)
+{
+    adc_speed_sample_t sample;
+
+    if (adc_speed_get_latest(&sample))
+    {
+        app_write_adc_sample(&sample);
+    }
+    else
+    {
+        uart_cli_write_string("adc no sample\r\n");
     }
 }
 
@@ -169,7 +204,7 @@ static void app_set_single_open_lock(uint8_t open_lock)
 
 static void app_write_help(void)
 {
-    uart_cli_write_string("cmd: 1-5 select, F front, B back, s stop, l lock all, p step test, r pos, m monitor\r\n");
+    uart_cli_write_string("cmd: 1-5 select, F/B drive, s stop, l lock, p step, r pos, m pos mon, a adc, v adc mon\r\n");
 }
 
 static void app_start_drive(logan_spi_direction_t direction)
@@ -254,6 +289,21 @@ static void app_handle_uart_command(uart_command_t command)
                 uart_cli_write_string("pos monitor off\r\n");
             }
             break;
+        case UART_COMMAND_ADC_READ:
+            app_write_latest_adc();
+            break;
+        case UART_COMMAND_ADC_MONITOR:
+            app_adc_monitor_enabled = !app_adc_monitor_enabled;
+            app_adc_report_count = 0U;
+            if (app_adc_monitor_enabled)
+            {
+                uart_cli_write_string("adc monitor on\r\n");
+            }
+            else
+            {
+                uart_cli_write_string("adc monitor off\r\n");
+            }
+            break;
         case UART_COMMAND_INVALID:
         default:
             uart_cli_write_string("invalid cmd, ? for help\r\n");
@@ -291,6 +341,41 @@ static bool app_try_send_control(void)
                                           app_direction,
                                           app_lock_mask);
     app_write_control_tx(control_byte);
+    return true;
+}
+
+static bool app_try_apply_adc_speed(void)
+{
+    adc_speed_sample_t sample;
+    bool frequency_changed = false;
+
+    if (!adc_speed_take_update(&sample))
+    {
+        return false;
+    }
+
+    if (((sample.frequency_hz > app_step_frequency_hz)
+         && ((sample.frequency_hz - app_step_frequency_hz) >= APP_ADC_SPEED_DEADBAND_HZ))
+        || ((sample.frequency_hz < app_step_frequency_hz)
+            && ((app_step_frequency_hz - sample.frequency_hz) >= APP_ADC_SPEED_DEADBAND_HZ)))
+    {
+        if (step_pwm_set_frequency_hz(sample.frequency_hz))
+        {
+            app_step_frequency_hz = sample.frequency_hz;
+            frequency_changed = true;
+        }
+    }
+
+    if (app_adc_monitor_enabled)
+    {
+        app_adc_report_count++;
+        if ((app_adc_report_count >= APP_ADC_REPORT_DIVIDER) || frequency_changed)
+        {
+            app_adc_report_count = 0U;
+            app_write_adc_sample(&sample);
+        }
+    }
+
     return true;
 }
 
@@ -347,6 +432,7 @@ int main(void)
     logan_spi_init();
     step_pwm_init();
     position_pwm_init();
+    adc_speed_init();
 
     while (1)
     {
@@ -369,6 +455,11 @@ int main(void)
             did_work = true;
         }
 
+        if (app_try_apply_adc_speed())
+        {
+            did_work = true;
+        }
+
         if (app_try_report_position())
         {
             did_work = true;
@@ -384,4 +475,5 @@ int main(void)
 void SysTick_Handler(void)
 {
     logan_spi_tick_1ms();
+    adc_speed_tick_1ms();
 }
