@@ -15,18 +15,13 @@
 #define LOGAN_SPI_GPIO_AF LL_GPIO_AF_5
 
 #define LOGAN_SPI_TARGET_HZ 1000000U
-#define LOGAN_SPI_ERROR_MODF (1U << 0)
-#define LOGAN_SPI_ERROR_OVR (1U << 1)
-#define LOGAN_SPI_ERROR_FRE (1U << 2)
+#define LOGAN_SPI_CONTROL_INTERVAL_MS 4U
 
 static volatile bool initialized = false;
 static volatile bool transfer_active = false;
 static volatile bool tx_loaded = false;
 static volatile uint8_t pending_tx = 0U;
-static volatile uint8_t last_rx = 0U;
-static volatile bool last_rx_valid = false;
 static volatile uint8_t control_cooldown_ms = 0U;
-static volatile uint32_t error_flags = 0U;
 
 static void logan_spi_select(void)
 {
@@ -108,9 +103,7 @@ void logan_spi_init(void)
     initialized = false;
     transfer_active = false;
     tx_loaded = false;
-    last_rx_valid = false;
     control_cooldown_ms = 0U;
-    error_flags = 0U;
 
     logan_spi_gpio_init();
 
@@ -150,7 +143,7 @@ void logan_spi_tick_1ms(void)
     }
 }
 
-bool logan_spi_is_ready(void)
+static bool logan_spi_is_ready(void)
 {
     return initialized && (LL_SPI_IsEnabled(LOGAN_SPI_INSTANCE) != 0U);
 }
@@ -158,11 +151,6 @@ bool logan_spi_is_ready(void)
 bool logan_spi_is_busy(void)
 {
     return transfer_active;
-}
-
-uint32_t logan_spi_error_flags(void)
-{
-    return error_flags;
 }
 
 uint8_t logan_spi_make_control(bool freewheel,
@@ -184,7 +172,7 @@ uint8_t logan_spi_make_control(bool freewheel,
     return control;
 }
 
-logan_spi_result_t logan_spi_transfer_byte(uint8_t tx_byte)
+static logan_spi_result_t logan_spi_transfer_byte(uint8_t tx_byte)
 {
     if (!logan_spi_is_ready())
     {
@@ -200,7 +188,6 @@ logan_spi_result_t logan_spi_transfer_byte(uint8_t tx_byte)
 
     pending_tx = tx_byte;
     tx_loaded = false;
-    last_rx_valid = false;
     transfer_active = true;
 
     logan_spi_select();
@@ -230,31 +217,10 @@ logan_spi_result_t logan_spi_send_control(uint8_t control_byte)
     return result;
 }
 
-logan_spi_result_t logan_spi_send_control_state(bool freewheel,
-                                                logan_spi_direction_t direction,
-                                                uint8_t lock_mask)
-{
-    return logan_spi_send_control(logan_spi_make_control(freewheel,
-                                                        direction,
-                                                        lock_mask));
-}
-
-bool logan_spi_get_last_rx(uint8_t *rx_byte)
-{
-    if ((rx_byte == NULL) || !last_rx_valid)
-    {
-        return false;
-    }
-
-    *rx_byte = last_rx;
-    return true;
-}
-
 void SPI1_IRQHandler(void)
 {
     if (LL_SPI_IsActiveFlag_MODF(LOGAN_SPI_INSTANCE))
     {
-        error_flags |= LOGAN_SPI_ERROR_MODF;
         LL_SPI_DisableIT_TXE(LOGAN_SPI_INSTANCE);
         LL_SPI_DisableIT_RXNE(LOGAN_SPI_INSTANCE);
         LL_SPI_DisableIT_ERR(LOGAN_SPI_INSTANCE);
@@ -268,13 +234,11 @@ void SPI1_IRQHandler(void)
 
     if (LL_SPI_IsActiveFlag_OVR(LOGAN_SPI_INSTANCE))
     {
-        error_flags |= LOGAN_SPI_ERROR_OVR;
         LL_SPI_ClearFlag_OVR(LOGAN_SPI_INSTANCE);
     }
 
     if (LL_SPI_IsActiveFlag_FRE(LOGAN_SPI_INSTANCE))
     {
-        error_flags |= LOGAN_SPI_ERROR_FRE;
         LL_SPI_ClearFlag_FRE(LOGAN_SPI_INSTANCE);
     }
 
@@ -290,8 +254,7 @@ void SPI1_IRQHandler(void)
     if (LL_SPI_IsEnabledIT_RXNE(LOGAN_SPI_INSTANCE)
         && LL_SPI_IsActiveFlag_RXNE(LOGAN_SPI_INSTANCE))
     {
-        last_rx = LL_SPI_ReceiveData8(LOGAN_SPI_INSTANCE);
-        last_rx_valid = true;
+        (void)LL_SPI_ReceiveData8(LOGAN_SPI_INSTANCE);
         transfer_active = false;
         tx_loaded = false;
         LL_SPI_DisableIT_RXNE(LOGAN_SPI_INSTANCE);
