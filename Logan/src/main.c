@@ -58,7 +58,10 @@ static uint8_t app_target_parse_buffer[3];
 static uint8_t app_position_report_count[POSITION_PWM_CHANNEL_COUNT];
 static bool app_symbol_active = false;
 static uint8_t app_symbol_index = 0U;
-static const uint8_t app_symbol_targets[APP_SYMBOL_TARGET_COUNT] = { 14U, 10U, 6U, 10U, 14U };
+static bool app_symbol_parse_active = false;
+static const uint8_t app_symbol_1_targets[APP_SYMBOL_TARGET_COUNT] = { 14U, 10U, 6U, 10U, 14U };
+static const uint8_t app_symbol_2_targets[APP_SYMBOL_TARGET_COUNT] = { 6U, 10U, 14U, 10U, 6U };
+static const uint8_t *app_symbol_targets = app_symbol_1_targets;
 
 static void app_stop_drive(void);
 
@@ -372,7 +375,7 @@ static void app_set_single_open_lock(uint8_t open_lock)
 
 static void app_write_help(void)
 {
-    uart_cli_write_string("cmd: 1-5 select, F/B drive, s stop, l lock, p step, r pos, m pos mon, a adc, v adc mon, T105 target, S symbol, x dir map\r\n");
+    uart_cli_write_string("cmd: 1-5 select, F/B drive, s stop, l lock, p step, r pos, m pos mon, a adc, v adc mon, T105 target, S1/S2 symbol, x dir map\r\n");
 }
 
 static void app_reset_position_report_counts(void)
@@ -418,14 +421,43 @@ static void app_lock_all(void)
     app_lock_mask = APP_ALL_LOCKS;
 }
 
-static void app_start_symbol(void)
+static void app_start_symbol(uint8_t symbol_id)
 {
     app_abort_motion_if_active();
     step_pwm_stop();
     app_step_start_pending = false;
+    app_symbol_targets = (symbol_id == 2U) ? app_symbol_2_targets : app_symbol_1_targets;
     app_symbol_index = 0U;
     app_symbol_active = true;
-    uart_cli_write_string("symbol V\r\n");
+    uart_cli_write_string("symbol ");
+    app_write_u32(symbol_id);
+    uart_cli_write_string("\r\n");
+}
+
+static bool app_handle_symbol_command(uint8_t ch)
+{
+    if (!app_symbol_parse_active)
+    {
+        if (ch == 'S')
+        {
+            app_symbol_parse_active = true;
+            return true;
+        }
+
+        return false;
+    }
+
+    app_symbol_parse_active = false;
+    if ((ch == '1') || (ch == '2'))
+    {
+        app_start_symbol((uint8_t)(ch - '0'));
+    }
+    else
+    {
+        uart_cli_write_string("invalid symbol, use S1 or S2\r\n");
+    }
+
+    return true;
 }
 
 static void app_handle_uart_command(uart_command_t command)
@@ -513,7 +545,7 @@ static void app_handle_uart_command(uart_command_t command)
             }
             break;
         case UART_COMMAND_SYMBOL:
-            app_start_symbol();
+            app_start_symbol(1U);
             break;
         case UART_COMMAND_TARGET_DIRECTION_TOGGLE:
             app_abort_motion_if_active();
@@ -616,6 +648,11 @@ static void app_handle_uart_input(uint8_t ch)
         case TARGET_PARSE_NONE:
         default:
             break;
+    }
+
+    if (app_handle_symbol_command(ch))
+    {
+        return;
     }
 
     app_handle_uart_command(app_parse_uart_command(ch));
