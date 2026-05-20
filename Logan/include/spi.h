@@ -36,5 +36,8 @@ uint8_t logan_spi_make_control(bool freewheel,
                                logan_spi_direction_t direction,
                                uint8_t lock_mask);
 logan_spi_result_t logan_spi_send_control(uint8_t control_byte);
+logan_spi_result_t logan_spi_send_control_state(bool freewheel,
+                                                logan_spi_direction_t direction,
+                                                uint8_t lock_mask);
 
 #endif /* LOGAN_SPI_H */

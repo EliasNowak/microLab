@@ -217,6 +217,15 @@ logan_spi_result_t logan_spi_send_control(uint8_t control_byte)
     return result;
 }
 
+logan_spi_result_t logan_spi_send_control_state(bool freewheel,
+                                                logan_spi_direction_t direction,
+                                                uint8_t lock_mask)
+{
+    return logan_spi_send_control(logan_spi_make_control(freewheel,
+                                                         direction,
+                                                         lock_mask));
+}
+
 void SPI1_IRQHandler(void)
 {
     if (LL_SPI_IsActiveFlag_MODF(LOGAN_SPI_INSTANCE))
