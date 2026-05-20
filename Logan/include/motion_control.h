@@ -11,8 +11,6 @@
 #define MOTION_CONTROL_MAX_AREA 17U
 #define MOTION_CONTROL_MIN_DRIVE 1U
 #define MOTION_CONTROL_MAX_DRIVE 5U
-#define MOTION_CONTROL_SAMPLE_TIMEOUT_MS 250U
-#define MOTION_CONTROL_NO_PROGRESS_TIMEOUT_MS 5000U
 
 typedef enum
 {
@@ -57,7 +55,6 @@ typedef struct
     uint8_t target_area;
     uint8_t current_area;
     bool has_current_area;
-    bool front_increases_area;
     logan_spi_direction_t direction;
 } motion_control_status_t;
 

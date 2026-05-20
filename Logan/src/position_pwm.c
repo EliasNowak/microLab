@@ -5,6 +5,17 @@
 #define POSITION_PWM_TIMER TIM2
 #define POSITION_PWM_TIMER_HZ 1000000U
 #define POSITION_PWM_ALL_EXTI_LINES (LL_EXTI_LINE_0 | LL_EXTI_LINE_1 | LL_EXTI_LINE_2 | LL_EXTI_LINE_10 | LL_EXTI_LINE_14)
+#define POSITION_PWM_MIN_PERIOD_US 7000U
+#define POSITION_PWM_MAX_PERIOD_US 9000U
+#define POSITION_PWM_DUTY_MAX 31U
+#define POSITION_PWM_ERROR_DUTY 1U
+#define POSITION_PWM_MIN_AREA_DUTY 2U
+#define POSITION_PWM_MAX_AREA_DUTY 18U
+#define POSITION_PWM_CHANNEL_SIG1 0U
+#define POSITION_PWM_CHANNEL_SIG2 1U
+#define POSITION_PWM_CHANNEL_SIG3 2U
+#define POSITION_PWM_CHANNEL_SIG4 3U
+#define POSITION_PWM_CHANNEL_SIG5 4U
 
 typedef struct
 {
@@ -194,26 +205,6 @@ void position_pwm_init(void)
     position_pwm_gpio_exti_init();
 }
 
-bool position_pwm_has_sample(void)
-{
-    return position_pwm_has_sample_channel(POSITION_PWM_CHANNEL_SIG1);
-}
-
-bool position_pwm_has_sample_channel(uint8_t channel)
-{
-    if (!position_pwm_channel_valid(channel))
-    {
-        return false;
-    }
-
-    return have_sample[channel];
-}
-
-bool position_pwm_get_latest(position_pwm_sample_t *sample)
-{
-    return position_pwm_get_latest_channel(POSITION_PWM_CHANNEL_SIG1, sample);
-}
-
 bool position_pwm_get_latest_channel(uint8_t channel, position_pwm_sample_t *sample)
 {
     uint32_t high_us;
@@ -237,11 +228,6 @@ bool position_pwm_get_latest_channel(uint8_t channel, position_pwm_sample_t *sam
 
     position_pwm_fill_sample(sample, high_us, period_us);
     return true;
-}
-
-bool position_pwm_take_new_sample(position_pwm_sample_t *sample)
-{
-    return position_pwm_take_new_sample_channel(POSITION_PWM_CHANNEL_SIG1, sample);
 }
 
 bool position_pwm_take_new_sample_channel(uint8_t channel, position_pwm_sample_t *sample)

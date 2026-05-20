@@ -10,6 +10,7 @@
 #define APP_POSITION_REPORT_DIVIDER 16U
 #define APP_ADC_REPORT_DIVIDER 10U
 #define APP_ADC_SPEED_DEADBAND_HZ 25U
+#define APP_SYMBOL_TARGET_COUNT 5U
 
 typedef enum
 {
@@ -25,11 +26,11 @@ typedef enum
     UART_COMMAND_STOP = 's',
     UART_COMMAND_DRIVE_FRONT = 'F',
     UART_COMMAND_DRIVE_BACK = 'B',
-    UART_COMMAND_STEP_PWM_TEST = 'p',
     UART_COMMAND_POSITION_READ = 'r',
     UART_COMMAND_POSITION_MONITOR = 'm',
     UART_COMMAND_ADC_READ = 'a',
     UART_COMMAND_ADC_MONITOR = 'v',
+    UART_COMMAND_SYMBOL = 'S',
     UART_COMMAND_TARGET_DIRECTION_TOGGLE = 'x'
 } uart_command_t;
 
@@ -54,6 +55,9 @@ static bool app_target_parse_active = false;
 static uint8_t app_target_parse_digits = 0U;
 static uint8_t app_target_parse_buffer[3];
 static uint8_t app_position_report_count[POSITION_PWM_CHANNEL_COUNT];
+static bool app_symbol_active = false;
+static uint8_t app_symbol_index = 0U;
+static const uint8_t app_symbol_targets[APP_SYMBOL_TARGET_COUNT] = { 14U, 10U, 6U, 10U, 14U };
 
 static void app_stop_drive(void);
 
@@ -95,6 +99,8 @@ static uart_command_t app_parse_uart_command(uint8_t ch)
             return UART_COMMAND_ADC_READ;
         case 'v':
             return UART_COMMAND_ADC_MONITOR;
+        case 'S':
+            return UART_COMMAND_SYMBOL;
         case 'x':
             return UART_COMMAND_TARGET_DIRECTION_TOGGLE;
         default:
@@ -365,7 +371,7 @@ static void app_set_single_open_lock(uint8_t open_lock)
 
 static void app_write_help(void)
 {
-    uart_cli_write_string("cmd: 1-5 select, F/B drive, s stop, l lock, p step, r pos, m pos mon, a adc, v adc mon, T105 target, x dir map\r\n");
+    uart_cli_write_string("cmd: 1-5 select, F/B drive, s stop, l lock, p step, r pos, m pos mon, a adc, v adc mon, T105 target, S symbol, x dir map\r\n");
 }
 
 static void app_reset_position_report_counts(void)
@@ -380,6 +386,7 @@ static void app_reset_position_report_counts(void)
 
 static void app_abort_motion_if_active(void)
 {
+    app_symbol_active = false;
     if (motion_control_abort())
     {
         app_stop_drive();
@@ -408,6 +415,16 @@ static void app_lock_all(void)
 {
     app_stop_drive();
     app_lock_mask = APP_ALL_LOCKS;
+}
+
+static void app_start_symbol(void)
+{
+    app_abort_motion_if_active();
+    step_pwm_stop();
+    app_step_start_pending = false;
+    app_symbol_index = 0U;
+    app_symbol_active = true;
+    uart_cli_write_string("symbol V\r\n");
 }
 
 static void app_handle_uart_command(uart_command_t command)
@@ -494,6 +511,9 @@ static void app_handle_uart_command(uart_command_t command)
                 uart_cli_write_string("adc monitor off\r\n");
             }
             break;
+        case UART_COMMAND_SYMBOL:
+            app_start_symbol();
+            break;
         case UART_COMMAND_TARGET_DIRECTION_TOGGLE:
             app_abort_motion_if_active();
             motion_control_set_front_increases_area(!motion_control_get_front_increases_area());
@@ -530,6 +550,51 @@ static void app_handle_target_command(uint8_t drive_id, uint8_t target_area)
     uart_cli_write_string(" area=");
     app_write_u32(target_area);
     uart_cli_write_string("\r\n");
+}
+
+static bool app_try_run_symbol(void)
+{
+    motion_control_status_t status;
+    uint8_t drive_id;
+    uint8_t target_area;
+
+    if (!app_symbol_active || motion_control_is_active())
+    {
+        return false;
+    }
+
+    status = motion_control_get_status();
+    if (status.state == MOTION_CONTROL_STATE_ERROR)
+    {
+        app_symbol_active = false;
+        uart_cli_write_string("symbol failed\r\n");
+        return true;
+    }
+
+    if (app_symbol_index >= APP_SYMBOL_TARGET_COUNT)
+    {
+        app_symbol_active = false;
+        uart_cli_write_string("symbol done\r\n");
+        return true;
+    }
+
+    drive_id = (uint8_t)(app_symbol_index + 1U);
+    target_area = app_symbol_targets[app_symbol_index];
+    app_symbol_index++;
+
+    if (!motion_control_start_target(drive_id, target_area))
+    {
+        app_symbol_active = false;
+        uart_cli_write_string("symbol invalid\r\n");
+        return true;
+    }
+
+    uart_cli_write_string("symbol drive=");
+    app_write_u32(drive_id);
+    uart_cli_write_string(" area=");
+    app_write_u32(target_area);
+    uart_cli_write_string("\r\n");
+    return true;
 }
 
 static void app_handle_uart_input(uint8_t ch)
@@ -799,6 +864,11 @@ int main(void)
         }
 
         if (app_try_run_motion(position_samples, position_sample_ready))
+        {
+            did_work = true;
+        }
+
+        if (app_try_run_symbol())
         {
             did_work = true;
         }

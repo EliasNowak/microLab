@@ -10,9 +10,7 @@
 #define STEP_PWM_DUTY_DIVISOR 2U
 #define STEP_PWM_MIN_PERIOD_TICKS 2U
 #define STEP_PWM_MAX_PERIOD_TICKS 65536U
-
-static uint16_t current_frequency_hz = STEP_PWM_DEFAULT_FREQUENCY_HZ;
-static bool running = false;
+#define STEP_PWM_MAX_FREQUENCY_HZ 5000U
 
 static void step_pwm_gpio_output_low(void)
 {
@@ -117,7 +115,6 @@ static bool step_pwm_apply_frequency(uint16_t frequency_hz)
     LL_TIM_SetCounter(STEP_PWM_TIMER, 0U);
     LL_TIM_GenerateEvent_UPDATE(STEP_PWM_TIMER);
 
-    current_frequency_hz = frequency_hz;
     return true;
 }
 
@@ -126,7 +123,6 @@ void step_pwm_init(void)
     LL_TIM_InitTypeDef tim_init;
     LL_TIM_OC_InitTypeDef oc_init;
 
-    running = false;
     step_pwm_gpio_output_low();
 
     LL_APB1_GRP1_EnableClock(LL_APB1_GRP1_PERIPH_TIM3);
@@ -156,29 +152,17 @@ bool step_pwm_set_frequency_hz(uint16_t frequency_hz)
     return step_pwm_apply_frequency(frequency_hz);
 }
 
-uint16_t step_pwm_get_frequency_hz(void)
-{
-    return current_frequency_hz;
-}
-
 void step_pwm_start(void)
 {
     step_pwm_gpio_alternate();
     LL_TIM_SetCounter(STEP_PWM_TIMER, 0U);
     LL_TIM_CC_EnableChannel(STEP_PWM_TIMER, STEP_PWM_CHANNEL);
     LL_TIM_EnableCounter(STEP_PWM_TIMER);
-    running = true;
 }
 
 void step_pwm_stop(void)
 {
     LL_TIM_DisableCounter(STEP_PWM_TIMER);
     LL_TIM_CC_DisableChannel(STEP_PWM_TIMER, STEP_PWM_CHANNEL);
-    running = false;
     step_pwm_gpio_output_low();
-}
-
-bool step_pwm_is_running(void)
-{
-    return running;
 }

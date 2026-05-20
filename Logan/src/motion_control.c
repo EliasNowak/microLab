@@ -3,6 +3,8 @@
 #include <stddef.h>
 
 #define MOTION_CONTROL_HOLD_LOCK_MASK LOGAN_SPI_CONTROL_LOCK_MASK
+#define MOTION_CONTROL_SAMPLE_TIMEOUT_MS 250U
+#define MOTION_CONTROL_NO_PROGRESS_TIMEOUT_MS 5000U
 
 static volatile motion_control_state_t state = MOTION_CONTROL_STATE_IDLE;
 static volatile motion_control_error_t error = MOTION_CONTROL_ERROR_NONE;
@@ -394,7 +396,6 @@ motion_control_status_t motion_control_get_status(void)
     status.target_area = target_area;
     status.current_area = current_area;
     status.has_current_area = has_current_area;
-    status.front_increases_area = front_increases_area;
     status.direction = direction;
     return status;
 }

@@ -29,7 +29,7 @@ static uint16_t uart_cli_next_index(uint16_t index, uint16_t size)
     return index;
 }
 
-bool uart_cli_is_ready(void)
+static bool uart_cli_is_ready(void)
 {
     return LL_USART_IsActiveFlag_TEACK(UART_CLI_USART)
         && LL_USART_IsActiveFlag_REACK(UART_CLI_USART);
@@ -111,36 +111,6 @@ bool uart_cli_write_byte(uint8_t ch)
     tx_head = next_head;
     LL_USART_EnableIT_TXE(UART_CLI_USART);
     return true;
-}
-
-size_t uart_cli_write(const uint8_t *data, size_t len)
-{
-    size_t written = 0U;
-
-    if ((data == NULL) || !uart_cli_is_ready())
-    {
-        return 0U;
-    }
-
-    while (written < len)
-    {
-        uint16_t next_head = uart_cli_next_index(tx_head, UART_CLI_TX_BUF_SIZE);
-        if (next_head == tx_tail)
-        {
-            break;
-        }
-
-        tx_buffer[tx_head] = data[written];
-        tx_head = next_head;
-        written++;
-    }
-
-    if (written > 0U)
-    {
-        LL_USART_EnableIT_TXE(UART_CLI_USART);
-    }
-
-    return written;
 }
 
 size_t uart_cli_write_string(const char *str)

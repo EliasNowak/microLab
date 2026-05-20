@@ -6,6 +6,10 @@
 #define ADC_SPEED_GPIO_PORT GPIOA
 #define ADC_SPEED_GPIO_PIN LL_GPIO_PIN_7
 #define ADC_SPEED_CHANNEL LL_ADC_CHANNEL_4
+#define ADC_SPEED_RAW_MAX 4095U
+#define ADC_SPEED_MIN_FREQUENCY_HZ 125U
+#define ADC_SPEED_MAX_FREQUENCY_HZ 5000U
+#define ADC_SPEED_SAMPLE_INTERVAL_MS 20U
 #define ADC_SPEED_REGULATOR_STARTUP_MS 1U
 
 typedef enum
@@ -159,6 +163,8 @@ void adc_speed_tick_1ms(void)
 
 bool adc_speed_get_latest(adc_speed_sample_t *sample)
 {
+    bool ready;
+
     if (sample == NULL)
     {
         return false;
@@ -167,14 +173,16 @@ bool adc_speed_get_latest(adc_speed_sample_t *sample)
     NVIC_DisableIRQ(ADC1_2_IRQn);
     sample->raw = latest_raw;
     sample->frequency_hz = latest_frequency_hz;
-    sample->ready = ((adc_state == ADC_SPEED_STATE_READY) && latest_sample_valid);
+    ready = ((adc_state == ADC_SPEED_STATE_READY) && latest_sample_valid);
     NVIC_EnableIRQ(ADC1_2_IRQn);
 
-    return sample->ready;
+    return ready;
 }
 
 bool adc_speed_take_update(adc_speed_sample_t *sample)
 {
+    bool ready;
+
     if (sample == NULL)
     {
         return false;
@@ -189,11 +197,11 @@ bool adc_speed_take_update(adc_speed_sample_t *sample)
 
     sample->raw = latest_raw;
     sample->frequency_hz = latest_frequency_hz;
-    sample->ready = ((adc_state == ADC_SPEED_STATE_READY) && latest_sample_valid);
+    ready = ((adc_state == ADC_SPEED_STATE_READY) && latest_sample_valid);
     adc_update_pending = false;
     NVIC_EnableIRQ(ADC1_2_IRQn);
 
-    return sample->ready;
+    return ready;
 }
 
 void ADC1_2_IRQHandler(void)
